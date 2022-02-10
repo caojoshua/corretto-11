@@ -83,6 +83,9 @@ public class ExecutionEnvironment extends TestHelper {
 
     static final File testJarFile = new File("EcoFriendly.jar");
 
+    static final boolean IS_EXPANDED_LD_LIBRARY_PATH =
+            Boolean.getBoolean("expandedLdLibraryPath");
+
     public ExecutionEnvironment() {
         createTestJar();
     }
@@ -137,14 +140,16 @@ public class ExecutionEnvironment extends TestHelper {
 
         for (String x : LD_PATH_STRINGS) {
             if (!tr.contains(x)) {
-                if (TestHelper.isAIX && x.startsWith(LD_LIBRARY_PATH)) {
+                if (IS_EXPANDED_LD_LIBRARY_PATH && x.startsWith(LD_LIBRARY_PATH)) {
                     // AIX does not support the '-rpath' linker options so the
                     // launchers have to prepend the jdk library path to 'LIBPATH'.
-                    String aixLibPath = LD_LIBRARY_PATH + "=" +
+                    // The musl library loader requires LD_LIBRARY_PATH to be set in
+                    // order to correctly resolve the dependency libjava.so has on libjvm.so.
+                    String libPath = LD_LIBRARY_PATH + "=" +
                         System.getenv(LD_LIBRARY_PATH) +
                         System.getProperty("path.separator") + LD_LIBRARY_PATH_VALUE;
-                    if (!tr.matches(aixLibPath)) {
-                        flagError(tr, "FAIL: did not get <" + aixLibPath + ">");
+                    if (!tr.matches(libPath)) {
+                        flagError(tr, "FAIL: did not get <" + libPath + ">");
                     }
                 }
                 else {
@@ -282,10 +287,6 @@ public class ExecutionEnvironment extends TestHelper {
         }
     }
     public static void main(String... args) throws Exception {
-        if (isWindows) {
-            System.err.println("Warning: test not applicable to windows");
-            return;
-        }
         ExecutionEnvironment ee = new ExecutionEnvironment();
         ee.run(args);
     }

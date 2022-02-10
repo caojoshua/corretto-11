@@ -1,0 +1,9 @@
+diff a/test/jdk/TEST.ROOT b/test/jdk/TEST.ROOT	(rejected hunks)
+@@ -52,6 +52,7 @@ requires.properties= \
+     vm.compiler1.enabled \
+     vm.compiler2.enabled \
+     vm.cds \
++    vm.musl \
+     vm.debug \
+     vm.hasSA \
+     vm.hasJFR \

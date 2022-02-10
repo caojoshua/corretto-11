@@ -1,0 +1,9 @@
+diff a/test/hotspot/jtreg/runtime/8176717/TestInheritFD.java b/test/hotspot/jtreg/runtime/8176717/TestInheritFD.java	(rejected hunks)
+@@ -30,6 +30,7 @@ import static java.util.stream.Collectors.toList;
+ import static jdk.test.lib.process.ProcessTools.createJavaProcessBuilder;
+ import static jdk.test.lib.Platform.isWindows;
+ import jdk.test.lib.Utils;
++import jdk.test.lib.Platform;
+ import jtreg.SkippedException;
+ 
+ import java.io.BufferedReader;

@@ -1,0 +1,10 @@
+diff a/src/hotspot/os/linux/os_linux.hpp b/src/hotspot/os/linux/os_linux.hpp	(rejected hunks)
+@@ -142,7 +142,7 @@ class Linux {
+   static bool get_frame_at_stack_banging_point(JavaThread* thread, ucontext_t* uc, frame* fr);
+ 
+   // GNU libc and libpthread version strings
+-  static const char *glibc_version()          { return _glibc_version; }
++  static const char *libc_version()           { return _libc_version; }
+   static const char *libpthread_version()     { return _libpthread_version; }
+ 
+   static void libpthread_init();

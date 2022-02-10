@@ -194,7 +194,14 @@ public class TestInheritFD {
     }
 
     static boolean findOpenLogFile(Collection<String> fileNames) {
+        String pid = Long.toString(ProcessHandle.current().pid());
+        String[] command = lsofCommand().orElseThrow(() ->
+                new RuntimeException("lsof like command not found"));
+        String lsof = command[0];
+        boolean isBusybox = Platform.isBusybox(lsof);
         return fileNames.stream()
+            // lsof from busybox does not support "-p" option
+            .filter(fileName -> !isBusybox || fileName.contains(pid))
             .filter(fileName -> fileName.contains(LOG_SUFFIX))
             .findAny()
             .isPresent();

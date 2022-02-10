@@ -1,0 +1,112 @@
+diff a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.cpp	(rejected hunks)
+@@ -104,7 +104,6 @@
+ # include <string.h>
+ # include <syscall.h>
+ # include <sys/sysinfo.h>
+-# include <gnu/libc-version.h>
+ # include <sys/ipc.h>
+ # include <sys/shm.h>
+ # include <link.h>
+@@ -156,7 +166,7 @@ int (*os::Linux::_pthread_setname_np)(pthread_t, const char*) = NULL;
+ pthread_t os::Linux::_main_thread;
+ int os::Linux::_page_size = -1;
+ bool os::Linux::_supports_fast_thread_cpu_time = false;
+-const char * os::Linux::_glibc_version = NULL;
++const char * os::Linux::_libc_version = NULL;
+ const char * os::Linux::_libpthread_version = NULL;
+ size_t os::Linux::_default_large_page_size = 0;
+ 
+@@ -510,17 +520,24 @@ void os::Linux::libpthread_init() {
+   #error "glibc too old (< 2.3.2)"
+ #endif
+ 
++#ifdef MUSL_LIBC
++  // confstr() from musl libc returns EINVAL for
++  // _CS_GNU_LIBC_VERSION and _CS_GNU_LIBPTHREAD_VERSION
++  os::Linux::set_libc_version("musl - unknown");
++  os::Linux::set_libpthread_version("musl - unknown");
++#else
+   size_t n = confstr(_CS_GNU_LIBC_VERSION, NULL, 0);
+   assert(n > 0, "cannot retrieve glibc version");
+   char *str = (char *)malloc(n, mtInternal);
+   confstr(_CS_GNU_LIBC_VERSION, str, n);
+-  os::Linux::set_glibc_version(str);
++  os::Linux::set_libc_version(str);
+ 
+   n = confstr(_CS_GNU_LIBPTHREAD_VERSION, NULL, 0);
+   assert(n > 0, "cannot retrieve pthread version");
+   str = (char *)malloc(n, mtInternal);
+   confstr(_CS_GNU_LIBPTHREAD_VERSION, str, n);
+   os::Linux::set_libpthread_version(str);
++#endif
+ }
+ 
+ /////////////////////////////////////////////////////////////////////////////
+@@ -2211,7 +2228,7 @@ void os::get_summary_os_info(char* buf, size_t buflen) {
+ void os::Linux::print_libversion_info(outputStream* st) {
+   // libc, pthread
+   st->print("libc: ");
+-  st->print("%s ", os::Linux::glibc_version());
++  st->print("%s ", os::Linux::libc_version());
+   st->print("%s ", os::Linux::libpthread_version());
+   st->cr();
+ }
+@@ -4321,6 +4361,40 @@ jlong os::Linux::fast_thread_cpu_time(clockid_t clockid) {
+ extern void report_error(char* file_name, int line_no, char* title,
+                          char* format, ...);
+ 
++// Some linux distributions (notably: Alpine Linux) include the
++// grsecurity in the kernel. Of particular interest from a JVM perspective
++// is PaX (https://pax.grsecurity.net/), which adds some security features
++// related to page attributes. Specifically, the MPROTECT PaX functionality
++// (https://pax.grsecurity.net/docs/mprotect.txt) prevents dynamic
++// code generation by disallowing a (previously) writable page to be
++// marked as executable. This is, of course, exactly what HotSpot does
++// for both JIT compiled method, as well as for stubs, adapters, etc.
++//
++// Instead of crashing "lazily" when trying to make a page executable,
++// this code probes for the presence of PaX and reports the failure
++// eagerly.
++static void check_pax(void) {
++  // Zero doesn't generate code dynamically, so no need to perform the PaX check
++#ifndef ZERO
++  size_t size = os::Linux::page_size();
++
++  void* p = ::mmap(NULL, size, PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
++  if (p == MAP_FAILED) {
++    log_debug(os)("os_linux.cpp: check_pax: mmap failed (%s)" , os::strerror(errno));
++    vm_exit_out_of_memory(size, OOM_MMAP_ERROR, "failed to allocate memory for PaX check.");
++  }
++
++  int res = ::mprotect(p, size, PROT_WRITE|PROT_EXEC);
++  if (res == -1) {
++    log_debug(os)("os_linux.cpp: check_pax: mprotect failed (%s)" , os::strerror(errno));
++    vm_exit_during_initialization(
++      "Failed to mark memory page as executable - check if grsecurity/PaX is enabled");
++  }
++
++  ::munmap(p, size);
++#endif
++}
++
+ // this is called _before_ most of the global arguments have been parsed
+ void os::init(void) {
+   char dummy;   // used to get a guess on initial stack address
+@@ -4354,6 +4428,8 @@ void os::init(void) {
+   Linux::_pthread_setname_np =
+     (int(*)(pthread_t, const char*))dlsym(RTLD_DEFAULT, "pthread_setname_np");
+ 
++  check_pax();
++
+   os::Posix::init();
+ 
+   initial_time_count = javaTimeNanos();
+@@ -4493,7 +4569,7 @@ jint os::init_2(void) {
+   Linux::libpthread_init();
+   Linux::sched_getcpu_init();
+   log_info(os)("HotSpot is running with %s, %s",
+-               Linux::glibc_version(), Linux::libpthread_version());
++               Linux::libc_version(), Linux::libpthread_version());
+ 
+   if (UseNUMA || UseNUMAInterleaving) {
+     Linux::numa_init();

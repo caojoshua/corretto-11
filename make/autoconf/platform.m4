@@ -247,6 +247,24 @@ AC_DEFUN([PLATFORM_EXTRACT_VARS_FROM_ABI],
   esac
 ])
 
+# Support macro for PLATFORM_EXTRACT_TARGET_AND_BUILD.
+# Converts autoconf style OS name to OpenJDK style, into
+# VAR_LIBC.
+AC_DEFUN([PLATFORM_EXTRACT_VARS_FROM_LIBC],
+[
+  case "$1" in
+    *linux*-musl)
+      VAR_LIBC=musl
+      ;;
+    *linux*-gnu)
+      VAR_LIBC=gnu
+      ;;
+    *)
+      VAR_LIBC=default
+      ;;
+  esac
+])
+
 # Expects $host_os $host_cpu $build_os and $build_cpu
 # and $with_target_bits to have been setup!
 #
@@ -596,9 +614,11 @@ AC_DEFUN([PLATFORM_SET_RELEASE_FILE_OS_VALUES],
     RELEASE_FILE_OS_NAME="AIX"
   fi
   RELEASE_FILE_OS_ARCH=${OPENJDK_TARGET_CPU}
+  RELEASE_FILE_LIBC=${OPENJDK_TARGET_LIBC}
 
   AC_SUBST(RELEASE_FILE_OS_NAME)
   AC_SUBST(RELEASE_FILE_OS_ARCH)
+  AC_SUBST(RELEASE_FILE_LIBC)
 ])
 
 AC_DEFUN([PLATFORM_SET_MODULE_TARGET_OS_VALUES],

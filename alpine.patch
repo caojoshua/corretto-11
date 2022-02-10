@@ -1,0 +1,1247 @@
+From 63009f90ec7df053c936226663b463b8584364a9 Mon Sep 17 00:00:00 2001
+From: Aleksei Voitylov <avoitylov@openjdk.org>
+Date: Tue, 13 Oct 2020 09:35:58 +0000
+Subject: [PATCH] 8247589: Implementation of Alpine Linux/x64 Port
+
+Co-authored-by: Mikael Vidstedt <mikael@openjdk.org>
+Co-authored-by: Alexander Scherbatiy <alexsch@openjdk.org>
+Co-authored-by: Axel Siebenborn <asiebenborn@openjdk.org>
+Co-authored-by: Aleksei Voitylov <avoitylov@openjdk.org>
+Reviewed-by: alanb, erikj, dholmes
+---
+ make/ReleaseFile.gmk                          |  1 +
+ make/autoconf/build-aux/config.guess          | 11 +++
+ make/autoconf/build-aux/config.sub            |  5 ++
+ make/autoconf/buildjdk-spec.gmk.in            |  3 +
+ make/autoconf/flags-cflags.m4                 |  5 ++
+ make/autoconf/platform.m4                     | 51 ++++++++++-
+ make/autoconf/spec.gmk.in                     |  7 ++
+ src/hotspot/os/linux/os_linux.cpp             | 86 +++++++++++++++++--
+ src/hotspot/os/linux/os_linux.hpp             | 13 +--
+ .../os_cpu/linux_aarch64/os_linux_aarch64.cpp |  1 -
+ src/hotspot/share/prims/whitebox.cpp          |  8 ++
+ .../share/runtime/abstract_vm_version.cpp     |  8 +-
+ src/java.base/unix/native/libjli/java_md.c    |  8 ++
+ .../linux/native/libsaproc/ps_proc.c          |  9 ++
+ .../share/native/libjdwp/util.h               |  6 ++
+ test/hotspot/jtreg/TEST.ROOT                  |  1 +
+ .../jtreg/runtime/8176717/TestInheritFD.java  |  8 ++
+ .../jtreg/runtime/StackGuardPages/exeinvoke.c | 30 ++++++-
+ test/hotspot/jtreg/runtime/TLS/exestack-tls.c |  9 ++
+ .../TestTerminatedThread.java                 |  3 +
+ test/jdk/TEST.ROOT                            |  1 +
+ .../nativeLibrary/NativeLibraryTest.java      |  3 +
+ test/jdk/java/lang/ProcessBuilder/Basic.java  | 63 +++++++++++---
+ .../RedirectWithLongFilename.java             |  6 +-
+ .../jdk/java/lang/ProcessHandle/InfoTest.java |  9 +-
+ .../tools/launcher/ExecutionEnvironment.java  | 32 +++++--
+ test/jdk/tools/launcher/Test7029048.java      | 29 +++++--
+ test/jtreg-ext/requires/VMProps.java          | 10 +++
+ test/lib/jdk/test/lib/Platform.java           | 12 +++
+ test/lib/sun/hotspot/WhiteBox.java            |  3 +
+ 30 files changed, 386 insertions(+), 55 deletions(-)
+
+diff --git a/make/ReleaseFile.gmk b/make/ReleaseFile.gmk
+index 14ebc9c32ae..0424e2fb623 100644
+--- a/make/ReleaseFile.gmk
++++ b/make/ReleaseFile.gmk
+@@ -53,6 +53,7 @@ define create-info-file
+   $(call info-file-item, "JAVA_VERSION_DATE", "$(VERSION_DATE)")
+   $(call info-file-item, "OS_NAME", "$(RELEASE_FILE_OS_NAME)")
+   $(call info-file-item, "OS_ARCH", "$(RELEASE_FILE_OS_ARCH)")
++  $(call info-file-item, "LIBC", "$(RELEASE_FILE_LIBC)")
+ endef
+ 
+ # Param 1 - The file containing the MODULES list
+diff --git a/make/autoconf/build-aux/config.guess b/make/autoconf/build-aux/config.guess
+index b650b5109d0..14f21a25e8f 100644
+--- a/make/autoconf/build-aux/config.guess
++++ b/make/autoconf/build-aux/config.guess
+@@ -30,6 +30,17 @@
+ DIR=`dirname $0`
+ OUT=`. $DIR/autoconf-config.guess`
+ 
++# Detect C library.
++# Use '-gnu'  suffix on systems that use glibc.
++# Use '-musl' suffix on systems that use the musl libc.
++echo $OUT | grep -- -linux- > /dev/null 2> /dev/null
++if test $? = 0; then
++  libc_vendor=`ldd --version 2>&1 | sed -n '1s/.*\(musl\).*/\1/p'`
++  if [ x"${libc_vendor}" = x"musl" ]; then
++    OUT=`echo $OUT | sed 's/-gnu/-musl/'`
++  fi
++fi
++
+ # Test and fix cygwin on x86_64
+ echo $OUT | grep 86-pc-cygwin > /dev/null 2> /dev/null
+ if test $? != 0; then
+diff --git a/make/autoconf/build-aux/config.sub b/make/autoconf/build-aux/config.sub
+index a36e6690728..d0dd001abdf 100644
+--- a/make/autoconf/build-aux/config.sub
++++ b/make/autoconf/build-aux/config.sub
+@@ -29,6 +29,11 @@
+ 
+ DIR=`dirname $0`
+ 
++if echo $* | grep linux-musl >/dev/null ; then
++    echo $*
++    exit
++fi
++
+ # Allow wsl
+ if echo $* | grep x86_64-pc-wsl >/dev/null ; then
+     echo $*
+diff --git a/make/autoconf/buildjdk-spec.gmk.in b/make/autoconf/buildjdk-spec.gmk.in
+index 7134e34bcee..524f35f417c 100644
+--- a/make/autoconf/buildjdk-spec.gmk.in
++++ b/make/autoconf/buildjdk-spec.gmk.in
+@@ -54,11 +54,13 @@ IMAGES_OUTPUTDIR := $(patsubst $(OUTPUTDIR)%,$(BUILDJDK_OUTPUTDIR)%,$(IMAGES_OUT
+ 
+ OPENJDK_BUILD_CPU_LEGACY := @OPENJDK_BUILD_CPU_LEGACY@
+ OPENJDK_BUILD_CPU_LEGACY_LIB := @OPENJDK_BUILD_CPU_LEGACY_LIB@
++OPENJDK_BUILD_LIBC := @OPENJDK_BUILD_LIBC@
+ OPENJDK_TARGET_CPU := @OPENJDK_BUILD_CPU@
+ OPENJDK_TARGET_CPU_ARCH := @OPENJDK_BUILD_CPU_ARCH@
+ OPENJDK_TARGET_CPU_BITS := @OPENJDK_BUILD_CPU_BITS@
+ OPENJDK_TARGET_CPU_ENDIAN := @OPENJDK_BUILD_CPU_ENDIAN@
+ OPENJDK_TARGET_CPU_LEGACY := @OPENJDK_BUILD_CPU_LEGACY@
++OPENJDK_TARGET_LIBC := @OPENJDK_BUILD_LIBC@
+ OPENJDK_TARGET_OS_INCLUDE_SUBDIR := @OPENJDK_BUILD_OS_INCLUDE_SUBDIR@
+ 
+ HOTSPOT_TARGET_OS := @HOTSPOT_BUILD_OS@
+@@ -66,6 +68,7 @@ HOTSPOT_TARGET_OS_TYPE := @HOTSPOT_BUILD_OS_TYPE@
+ HOTSPOT_TARGET_CPU := @HOTSPOT_BUILD_CPU@
+ HOTSPOT_TARGET_CPU_ARCH := @HOTSPOT_BUILD_CPU_ARCH@
+ HOTSPOT_TARGET_CPU_DEFINE := @HOTSPOT_BUILD_CPU_DEFINE@
++HOTSPOT_TARGET_LIBC := @HOTSPOT_BUILD_LIBC@
+ 
+ CFLAGS_JDKLIB := @OPENJDK_BUILD_CFLAGS_JDKLIB@
+ CXXFLAGS_JDKLIB := @OPENJDK_BUILD_CXXFLAGS_JDKLIB@
+diff --git a/make/autoconf/flags-cflags.m4 b/make/autoconf/flags-cflags.m4
+index 69b8303de3c..eeab75cde90 100644
+--- a/make/autoconf/flags-cflags.m4
++++ b/make/autoconf/flags-cflags.m4
+@@ -564,6 +564,11 @@ AC_DEFUN([FLAGS_SETUP_CFLAGS_HELPER],
+     fi
+   fi
+ 
++  OS_CFLAGS="$OS_CFLAGS -DLIBC=$OPENJDK_TARGET_LIBC"
++  if test "x$OPENJDK_TARGET_LIBC" = xmusl; then
++    OS_CFLAGS="$OS_CFLAGS -DMUSL_LIBC"
++  fi
++
+   # Where does this really belong??
+   if test "x$TOOLCHAIN_TYPE" = xgcc || test "x$TOOLCHAIN_TYPE" = xclang; then
+     PICFLAG="-fPIC"
+diff --git a/make/autoconf/platform.m4 b/make/autoconf/platform.m4
+index c0f2446dbd7..2f39d2b0ca7 100644
+--- a/make/autoconf/platform.m4
++++ b/make/autoconf/platform.m4
+@@ -220,6 +220,24 @@ AC_DEFUN([PLATFORM_EXTRACT_VARS_FROM_OS],
+   esac
+ ])
+ 
++# Support macro for PLATFORM_EXTRACT_TARGET_AND_BUILD.
++# Converts autoconf style OS name to OpenJDK style, into
++# VAR_LIBC.
++AC_DEFUN([PLATFORM_EXTRACT_VARS_FROM_LIBC],
++[
++  case "$1" in
++    *linux*-musl)
++      VAR_LIBC=musl
++      ;;
++    *linux*-gnu)
++      VAR_LIBC=gnu
++      ;;
++    *)
++      VAR_LIBC=default
++      ;;
++  esac
++])
++
+ # Expects $host_os $host_cpu $build_os and $build_cpu
+ # and $with_target_bits to have been setup!
+ #
+@@ -237,9 +255,10 @@ AC_DEFUN([PLATFORM_EXTRACT_TARGET_AND_BUILD],
+   AC_SUBST(OPENJDK_TARGET_AUTOCONF_NAME)
+   AC_SUBST(OPENJDK_BUILD_AUTOCONF_NAME)
+ 
+-  # Convert the autoconf OS/CPU value to our own data, into the VAR_OS/CPU variables.
++  # Convert the autoconf OS/CPU value to our own data, into the VAR_OS/CPU/LIBC variables.
+   PLATFORM_EXTRACT_VARS_FROM_OS($build_os)
+   PLATFORM_EXTRACT_VARS_FROM_CPU($build_cpu)
++  PLATFORM_EXTRACT_VARS_FROM_LIBC($build_os)
+   # ..and setup our own variables. (Do this explicitly to facilitate searching)
+   OPENJDK_BUILD_OS="$VAR_OS"
+   if test "x$VAR_OS_TYPE" != x; then
+@@ -256,6 +275,7 @@ AC_DEFUN([PLATFORM_EXTRACT_TARGET_AND_BUILD],
+   OPENJDK_BUILD_CPU_ARCH="$VAR_CPU_ARCH"
+   OPENJDK_BUILD_CPU_BITS="$VAR_CPU_BITS"
+   OPENJDK_BUILD_CPU_ENDIAN="$VAR_CPU_ENDIAN"
++  OPENJDK_BUILD_LIBC="$VAR_LIBC"
+   AC_SUBST(OPENJDK_BUILD_OS)
+   AC_SUBST(OPENJDK_BUILD_OS_TYPE)
+   AC_SUBST(OPENJDK_BUILD_OS_ENV)
+@@ -263,13 +283,20 @@ AC_DEFUN([PLATFORM_EXTRACT_TARGET_AND_BUILD],
+   AC_SUBST(OPENJDK_BUILD_CPU_ARCH)
+   AC_SUBST(OPENJDK_BUILD_CPU_BITS)
+   AC_SUBST(OPENJDK_BUILD_CPU_ENDIAN)
++  AC_SUBST(OPENJDK_BUILD_LIBC)
+ 
+   AC_MSG_CHECKING([openjdk-build os-cpu])
+   AC_MSG_RESULT([$OPENJDK_BUILD_OS-$OPENJDK_BUILD_CPU])
+ 
+-  # Convert the autoconf OS/CPU value to our own data, into the VAR_OS/CPU variables.
++  if test "x$OPENJDK_BUILD_OS" = "xlinux"; then
++    AC_MSG_CHECKING([openjdk-build C library])
++    AC_MSG_RESULT([$OPENJDK_BUILD_LIBC])
++  fi
++
++  # Convert the autoconf OS/CPU value to our own data, into the VAR_OS/CPU/LIBC variables.
+   PLATFORM_EXTRACT_VARS_FROM_OS($host_os)
+   PLATFORM_EXTRACT_VARS_FROM_CPU($host_cpu)
++  PLATFORM_EXTRACT_VARS_FROM_LIBC($host_os)
+   # ... and setup our own variables. (Do this explicitly to facilitate searching)
+   OPENJDK_TARGET_OS="$VAR_OS"
+   if test "x$VAR_OS_TYPE" != x; then
+@@ -287,6 +314,7 @@ AC_DEFUN([PLATFORM_EXTRACT_TARGET_AND_BUILD],
+   OPENJDK_TARGET_CPU_BITS="$VAR_CPU_BITS"
+   OPENJDK_TARGET_CPU_ENDIAN="$VAR_CPU_ENDIAN"
+   OPENJDK_TARGET_OS_UPPERCASE=`$ECHO $OPENJDK_TARGET_OS | $TR 'abcdefghijklmnopqrstuvwxyz' 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'`
++  OPENJDK_TARGET_LIBC="$VAR_LIBC"
+ 
+   AC_SUBST(OPENJDK_TARGET_OS)
+   AC_SUBST(OPENJDK_TARGET_OS_TYPE)
+@@ -296,9 +324,15 @@ AC_DEFUN([PLATFORM_EXTRACT_TARGET_AND_BUILD],
+   AC_SUBST(OPENJDK_TARGET_CPU_ARCH)
+   AC_SUBST(OPENJDK_TARGET_CPU_BITS)
+   AC_SUBST(OPENJDK_TARGET_CPU_ENDIAN)
++  AC_SUBST(OPENJDK_TARGET_LIBC)
+ 
+   AC_MSG_CHECKING([openjdk-target os-cpu])
+   AC_MSG_RESULT([$OPENJDK_TARGET_OS-$OPENJDK_TARGET_CPU])
++
++  if test "x$OPENJDK_TARGET_OS" = "xlinux"; then
++    AC_MSG_CHECKING([openjdk-target C library])
++    AC_MSG_RESULT([$OPENJDK_TARGET_LIBC])
++  fi
+ ])
+ 
+ # Check if a reduced build (32-bit on 64-bit platforms) is requested, and modify behaviour
+@@ -420,7 +454,13 @@ AC_DEFUN([PLATFORM_SETUP_LEGACY_VARS_HELPER],
+   else
+     OPENJDK_$1_CPU_BUNDLE="$OPENJDK_$1_CPU"
+   fi
+-  OPENJDK_$1_BUNDLE_PLATFORM="${OPENJDK_$1_OS_BUNDLE}-${OPENJDK_$1_CPU_BUNDLE}"
++
++  OPENJDK_$1_LIBC_BUNDLE=""
++  if test "x$OPENJDK_$1_LIBC" = "xmusl"; then
++    OPENJDK_$1_LIBC_BUNDLE="-$OPENJDK_$1_LIBC"
++  fi
++
++  OPENJDK_$1_BUNDLE_PLATFORM="${OPENJDK_$1_OS_BUNDLE}-${OPENJDK_$1_CPU_BUNDLE}${OPENJDK_$1_LIBC_BUNDLE}"
+   AC_SUBST(OPENJDK_$1_BUNDLE_PLATFORM)
+ 
+   if test "x$COMPILE_TYPE" = "xcross"; then
+@@ -493,6 +533,9 @@ AC_DEFUN([PLATFORM_SETUP_LEGACY_VARS_HELPER],
+   fi
+   AC_SUBST(HOTSPOT_$1_CPU_DEFINE)
+ 
++  HOTSPOT_$1_LIBC=$OPENJDK_$1_LIBC
++  AC_SUBST(HOTSPOT_$1_LIBC)
++
+   # For historical reasons, the OS include directories have odd names.
+   OPENJDK_$1_OS_INCLUDE_SUBDIR="$OPENJDK_TARGET_OS"
+   if test "x$OPENJDK_TARGET_OS" = "xwindows"; then
+@@ -518,9 +561,11 @@ AC_DEFUN([PLATFORM_SET_RELEASE_FILE_OS_VALUES],
+     RELEASE_FILE_OS_NAME="AIX"
+   fi
+   RELEASE_FILE_OS_ARCH=${OPENJDK_TARGET_CPU}
++  RELEASE_FILE_LIBC=${OPENJDK_TARGET_LIBC}
+ 
+   AC_SUBST(RELEASE_FILE_OS_NAME)
+   AC_SUBST(RELEASE_FILE_OS_ARCH)
++  AC_SUBST(RELEASE_FILE_LIBC)
+ ])
+ 
+ AC_DEFUN([PLATFORM_SET_MODULE_TARGET_OS_VALUES],
+diff --git a/make/autoconf/spec.gmk.in b/make/autoconf/spec.gmk.in
+index 14d7a18a0e8..256aec155ae 100644
+--- a/make/autoconf/spec.gmk.in
++++ b/make/autoconf/spec.gmk.in
+@@ -80,6 +80,8 @@ OPENJDK_TARGET_CPU_ARCH:=@OPENJDK_TARGET_CPU_ARCH@
+ OPENJDK_TARGET_CPU_BITS:=@OPENJDK_TARGET_CPU_BITS@
+ OPENJDK_TARGET_CPU_ENDIAN:=@OPENJDK_TARGET_CPU_ENDIAN@
+ 
++OPENJDK_TARGET_LIBC:=@OPENJDK_TARGET_LIBC@
++
+ COMPILE_TYPE:=@COMPILE_TYPE@
+ 
+ # Legacy support
+@@ -95,6 +97,8 @@ HOTSPOT_TARGET_CPU := @HOTSPOT_TARGET_CPU@
+ HOTSPOT_TARGET_CPU_ARCH := @HOTSPOT_TARGET_CPU_ARCH@
+ HOTSPOT_TARGET_CPU_DEFINE := @HOTSPOT_TARGET_CPU_DEFINE@
+ 
++HOTSPOT_TARGET_LIBC := @HOTSPOT_TARGET_LIBC@
++
+ OPENJDK_TARGET_BUNDLE_PLATFORM:=@OPENJDK_TARGET_BUNDLE_PLATFORM@
+ JDK_ARCH_ABI_PROP_NAME := @JDK_ARCH_ABI_PROP_NAME@
+ 
+@@ -109,6 +113,8 @@ OPENJDK_BUILD_CPU_ARCH:=@OPENJDK_BUILD_CPU_ARCH@
+ OPENJDK_BUILD_CPU_BITS:=@OPENJDK_BUILD_CPU_BITS@
+ OPENJDK_BUILD_CPU_ENDIAN:=@OPENJDK_BUILD_CPU_ENDIAN@
+ 
++OPENJDK_BUILD_LIBC:=@OPENJDK_BUILD_LIBC@
++
+ OPENJDK_BUILD_OS_INCLUDE_SUBDIR:=@OPENJDK_TARGET_OS_INCLUDE_SUBDIR@
+ 
+ # Target platform value in ModuleTarget class file attribute.
+@@ -117,6 +123,7 @@ OPENJDK_MODULE_TARGET_PLATFORM:=@OPENJDK_MODULE_TARGET_PLATFORM@
+ # OS_* properties in release file
+ RELEASE_FILE_OS_NAME:=@RELEASE_FILE_OS_NAME@
+ RELEASE_FILE_OS_ARCH:=@RELEASE_FILE_OS_ARCH@
++RELEASE_FILE_LIBC:=@RELEASE_FILE_LIBC@
+ 
+ SOURCE_DATE := @SOURCE_DATE@
+ ENABLE_REPRODUCIBLE_BUILD := @ENABLE_REPRODUCIBLE_BUILD@
+diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.cpp
+index cf20034772f..395bfa359f7 100644
+--- a/src/hotspot/os/linux/os_linux.cpp
++++ b/src/hotspot/os/linux/os_linux.cpp
+@@ -104,7 +104,6 @@
+ # include <string.h>
+ # include <syscall.h>
+ # include <sys/sysinfo.h>
+-# include <gnu/libc-version.h>
+ # include <sys/ipc.h>
+ # include <sys/shm.h>
+ # include <link.h>
+@@ -137,6 +136,17 @@
+ // for timer info max values which include all bits
+ #define ALL_64_BITS CONST64(0xFFFFFFFFFFFFFFFF)
+ 
++#ifdef MUSL_LIBC
++// dlvsym is not a part of POSIX
++// and musl libc doesn't implement it.
++static void *dlvsym(void *handle,
++                    const char *symbol,
++                    const char *version) {
++   // load the latest version of symbol
++   return dlsym(handle, symbol);
++}
++#endif
++
+ enum CoredumpFilterBit {
+   FILE_BACKED_PVT_BIT = 1 << 2,
+   FILE_BACKED_SHARED_BIT = 1 << 3,
+@@ -156,7 +166,7 @@ int (*os::Linux::_pthread_setname_np)(pthread_t, const char*) = NULL;
+ pthread_t os::Linux::_main_thread;
+ int os::Linux::_page_size = -1;
+ bool os::Linux::_supports_fast_thread_cpu_time = false;
+-const char * os::Linux::_glibc_version = NULL;
++const char * os::Linux::_libc_version = NULL;
+ const char * os::Linux::_libpthread_version = NULL;
+ size_t os::Linux::_default_large_page_size = 0;
+ 
+@@ -510,17 +520,24 @@ void os::Linux::libpthread_init() {
+   #error "glibc too old (< 2.3.2)"
+ #endif
+ 
++#ifdef MUSL_LIBC
++  // confstr() from musl libc returns EINVAL for
++  // _CS_GNU_LIBC_VERSION and _CS_GNU_LIBPTHREAD_VERSION
++  os::Linux::set_libc_version("musl - unknown");
++  os::Linux::set_libpthread_version("musl - unknown");
++#else
+   size_t n = confstr(_CS_GNU_LIBC_VERSION, NULL, 0);
+   assert(n > 0, "cannot retrieve glibc version");
+   char *str = (char *)malloc(n, mtInternal);
+   confstr(_CS_GNU_LIBC_VERSION, str, n);
+-  os::Linux::set_glibc_version(str);
++  os::Linux::set_libc_version(str);
+ 
+   n = confstr(_CS_GNU_LIBPTHREAD_VERSION, NULL, 0);
+   assert(n > 0, "cannot retrieve pthread version");
+   str = (char *)malloc(n, mtInternal);
+   confstr(_CS_GNU_LIBPTHREAD_VERSION, str, n);
+   os::Linux::set_libpthread_version(str);
++#endif
+ }
+ 
+ /////////////////////////////////////////////////////////////////////////////
+@@ -2211,7 +2228,7 @@ void os::get_summary_os_info(char* buf, size_t buflen) {
+ void os::Linux::print_libversion_info(outputStream* st) {
+   // libc, pthread
+   st->print("libc: ");
+-  st->print("%s ", os::Linux::glibc_version());
++  st->print("%s ", os::Linux::libc_version());
+   st->print("%s ", os::Linux::libpthread_version());
+   st->cr();
+ }
+@@ -3070,6 +3087,8 @@ bool os::Linux::libnuma_init() {
+     if (handle != NULL) {
+       set_numa_node_to_cpus(CAST_TO_FN_PTR(numa_node_to_cpus_func_t,
+                                            libnuma_dlsym(handle, "numa_node_to_cpus")));
++      set_numa_node_to_cpus_v2(CAST_TO_FN_PTR(numa_node_to_cpus_v2_func_t,
++                                              libnuma_v2_dlsym(handle, "numa_node_to_cpus")));
+       set_numa_max_node(CAST_TO_FN_PTR(numa_max_node_func_t,
+                                        libnuma_dlsym(handle, "numa_max_node")));
+       set_numa_num_configured_nodes(CAST_TO_FN_PTR(numa_num_configured_nodes_func_t,
+@@ -3208,6 +3227,26 @@ void os::Linux::rebuild_cpu_to_node_map() {
+   FREE_C_HEAP_ARRAY(unsigned long, cpu_map);
+ }
+ 
++int os::Linux::numa_node_to_cpus(int node, unsigned long *buffer, int bufferlen) {
++  // use the latest version of numa_node_to_cpus if available
++  if (_numa_node_to_cpus_v2 != NULL) {
++
++    // libnuma bitmask struct
++    struct bitmask {
++      unsigned long size; /* number of bits in the map */
++      unsigned long *maskp;
++    };
++
++    struct bitmask mask;
++    mask.maskp = (unsigned long *)buffer;
++    mask.size = bufferlen * 8;
++    return _numa_node_to_cpus_v2(node, &mask);
++  } else if (_numa_node_to_cpus != NULL) {
++    return _numa_node_to_cpus(node, buffer, bufferlen);
++  }
++  return -1;
++}
++
+ int os::Linux::get_node_by_cpu(int cpu_id) {
+   if (cpu_to_node() != NULL && cpu_id >= 0 && cpu_id < cpu_to_node()->length()) {
+     return cpu_to_node()->at(cpu_id);
+@@ -3219,6 +3258,7 @@ GrowableArray<int>* os::Linux::_cpu_to_node;
+ GrowableArray<int>* os::Linux::_nindex_to_node;
+ os::Linux::sched_getcpu_func_t os::Linux::_sched_getcpu;
+ os::Linux::numa_node_to_cpus_func_t os::Linux::_numa_node_to_cpus;
++os::Linux::numa_node_to_cpus_v2_func_t os::Linux::_numa_node_to_cpus_v2;
+ os::Linux::numa_max_node_func_t os::Linux::_numa_max_node;
+ os::Linux::numa_num_configured_nodes_func_t os::Linux::_numa_num_configured_nodes;
+ os::Linux::numa_available_func_t os::Linux::_numa_available;
+@@ -4321,6 +4361,40 @@ jlong os::Linux::fast_thread_cpu_time(clockid_t clockid) {
+ extern void report_error(char* file_name, int line_no, char* title,
+                          char* format, ...);
+ 
++// Some linux distributions (notably: Alpine Linux) include the
++// grsecurity in the kernel. Of particular interest from a JVM perspective
++// is PaX (https://pax.grsecurity.net/), which adds some security features
++// related to page attributes. Specifically, the MPROTECT PaX functionality
++// (https://pax.grsecurity.net/docs/mprotect.txt) prevents dynamic
++// code generation by disallowing a (previously) writable page to be
++// marked as executable. This is, of course, exactly what HotSpot does
++// for both JIT compiled method, as well as for stubs, adapters, etc.
++//
++// Instead of crashing "lazily" when trying to make a page executable,
++// this code probes for the presence of PaX and reports the failure
++// eagerly.
++static void check_pax(void) {
++  // Zero doesn't generate code dynamically, so no need to perform the PaX check
++#ifndef ZERO
++  size_t size = os::Linux::page_size();
++
++  void* p = ::mmap(NULL, size, PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
++  if (p == MAP_FAILED) {
++    log_debug(os)("os_linux.cpp: check_pax: mmap failed (%s)" , os::strerror(errno));
++    vm_exit_out_of_memory(size, OOM_MMAP_ERROR, "failed to allocate memory for PaX check.");
++  }
++
++  int res = ::mprotect(p, size, PROT_WRITE|PROT_EXEC);
++  if (res == -1) {
++    log_debug(os)("os_linux.cpp: check_pax: mprotect failed (%s)" , os::strerror(errno));
++    vm_exit_during_initialization(
++      "Failed to mark memory page as executable - check if grsecurity/PaX is enabled");
++  }
++
++  ::munmap(p, size);
++#endif
++}
++
+ // this is called _before_ most of the global arguments have been parsed
+ void os::init(void) {
+   char dummy;   // used to get a guess on initial stack address
+@@ -4354,6 +4428,8 @@ void os::init(void) {
+   Linux::_pthread_setname_np =
+     (int(*)(pthread_t, const char*))dlsym(RTLD_DEFAULT, "pthread_setname_np");
+ 
++  check_pax();
++
+   os::Posix::init();
+ 
+   initial_time_count = javaTimeNanos();
+@@ -4493,7 +4569,7 @@ jint os::init_2(void) {
+   Linux::libpthread_init();
+   Linux::sched_getcpu_init();
+   log_info(os)("HotSpot is running with %s, %s",
+-               Linux::glibc_version(), Linux::libpthread_version());
++               Linux::libc_version(), Linux::libpthread_version());
+ 
+   if (UseNUMA || UseNUMAInterleaving) {
+     Linux::numa_init();
+diff --git a/src/hotspot/os/linux/os_linux.hpp b/src/hotspot/os/linux/os_linux.hpp
+index 45d3bbc9d74..27fa4f7cb7c 100644
+--- a/src/hotspot/os/linux/os_linux.hpp
++++ b/src/hotspot/os/linux/os_linux.hpp
+@@ -42,7 +42,7 @@ class Linux {
+   static address   _initial_thread_stack_bottom;
+   static uintptr_t _initial_thread_stack_size;
+ 
+-  static const char *_glibc_version;
++  static const char *_libc_version;
+   static const char *_libpthread_version;
+ 
+   static bool _supports_fast_thread_cpu_time;
+@@ -69,7 +69,7 @@ class Linux {
+   static int commit_memory_impl(char* addr, size_t bytes,
+                                 size_t alignment_hint, bool exec);
+ 
+-  static void set_glibc_version(const char *s)      { _glibc_version = s; }
++  static void set_libc_version(const char *s)       { _libc_version = s; }
+   static void set_libpthread_version(const char *s) { _libpthread_version = s; }
+ 
+   static void rebuild_cpu_to_node_map();
+@@ -142,7 +142,7 @@ class Linux {
+   static bool get_frame_at_stack_banging_point(JavaThread* thread, ucontext_t* uc, frame* fr);
+ 
+   // GNU libc and libpthread version strings
+-  static const char *glibc_version()          { return _glibc_version; }
++  static const char *libc_version()           { return _libc_version; }
+   static const char *libpthread_version()     { return _libpthread_version; }
+ 
+   static void libpthread_init();
+@@ -183,6 +183,7 @@ class Linux {
+ 
+   typedef int (*sched_getcpu_func_t)(void);
+   typedef int (*numa_node_to_cpus_func_t)(int node, unsigned long *buffer, int bufferlen);
++  typedef int (*numa_node_to_cpus_v2_func_t)(int node, void *mask);
+   typedef int (*numa_max_node_func_t)(void);
+   typedef int (*numa_num_configured_nodes_func_t)(void);
+   typedef int (*numa_available_func_t)(void);
+@@ -199,6 +200,7 @@ class Linux {
+ 
+   static sched_getcpu_func_t _sched_getcpu;
+   static numa_node_to_cpus_func_t _numa_node_to_cpus;
++  static numa_node_to_cpus_v2_func_t _numa_node_to_cpus_v2;
+   static numa_max_node_func_t _numa_max_node;
+   static numa_num_configured_nodes_func_t _numa_num_configured_nodes;
+   static numa_available_func_t _numa_available;
+@@ -220,6 +222,7 @@ class Linux {
+ 
+   static void set_sched_getcpu(sched_getcpu_func_t func) { _sched_getcpu = func; }
+   static void set_numa_node_to_cpus(numa_node_to_cpus_func_t func) { _numa_node_to_cpus = func; }
++  static void set_numa_node_to_cpus_v2(numa_node_to_cpus_v2_func_t func) { _numa_node_to_cpus_v2 = func; }
+   static void set_numa_max_node(numa_max_node_func_t func) { _numa_max_node = func; }
+   static void set_numa_num_configured_nodes(numa_num_configured_nodes_func_t func) { _numa_num_configured_nodes = func; }
+   static void set_numa_available(numa_available_func_t func) { _numa_available = func; }
+@@ -249,9 +252,7 @@ class Linux {
+ 
+  public:
+   static int sched_getcpu()  { return _sched_getcpu != NULL ? _sched_getcpu() : -1; }
+-  static int numa_node_to_cpus(int node, unsigned long *buffer, int bufferlen) {
+-    return _numa_node_to_cpus != NULL ? _numa_node_to_cpus(node, buffer, bufferlen) : -1;
+-  }
++  static int numa_node_to_cpus(int node, unsigned long *buffer, int bufferlen);
+   static int numa_max_node() { return _numa_max_node != NULL ? _numa_max_node() : -1; }
+   static int numa_num_configured_nodes() {
+     return _numa_num_configured_nodes != NULL ? _numa_num_configured_nodes() : -1;
+diff --git a/src/hotspot/os_cpu/linux_aarch64/os_linux_aarch64.cpp b/src/hotspot/os_cpu/linux_aarch64/os_linux_aarch64.cpp
+index d4bca5cd374..6d0eca0306a 100644
+--- a/src/hotspot/os_cpu/linux_aarch64/os_linux_aarch64.cpp
++++ b/src/hotspot/os_cpu/linux_aarch64/os_linux_aarch64.cpp
+@@ -75,7 +75,6 @@
+ # include <pwd.h>
+ # include <poll.h>
+ # include <ucontext.h>
+-# include <fpu_control.h>
+ 
+ #define REG_FP 29
+ #define REG_LR 30
+diff --git a/src/hotspot/share/prims/whitebox.cpp b/src/hotspot/share/prims/whitebox.cpp
+index 034a60aa675..2df5c7acafa 100644
+--- a/src/hotspot/share/prims/whitebox.cpp
++++ b/src/hotspot/share/prims/whitebox.cpp
+@@ -2294,6 +2294,13 @@ WB_ENTRY(void, WB_WaitUnsafe(JNIEnv* env, jobject wb, jint time))
+     os::naked_short_sleep(time);
+ WB_END
+ 
++WB_ENTRY(jstring, WB_GetLibcName(JNIEnv* env, jobject o))
++  ThreadToNativeFromVM ttn(thread);
++  jstring info_string = env->NewStringUTF(XSTR(LIBC));
++  CHECK_JNI_EXCEPTION_(env, NULL);
++  return info_string;
++WB_END
++
+ #define CC (char*)
+ 
+ static JNINativeMethod methods[] = {
+@@ -2546,6 +2553,7 @@ static JNINativeMethod methods[] = {
+   {CC"getKlassMetadataSize", CC"(Ljava/lang/Class;)I",(void*)&WB_GetKlassMetadataSize},
+   {CC"isJVMTIIncluded", CC"()Z",                      (void*)&WB_IsJVMTIIncluded},
+   {CC"waitUnsafe", CC"(I)V",                          (void*)&WB_WaitUnsafe},
++  {CC"getLibcName",     CC"()Ljava/lang/String;",     (void*)&WB_GetLibcName},
+ };
+ 
+ 
+diff --git a/src/hotspot/share/runtime/abstract_vm_version.cpp b/src/hotspot/share/runtime/abstract_vm_version.cpp
+index 5876f6c5cc0..d34e1453793 100644
+--- a/src/hotspot/share/runtime/abstract_vm_version.cpp
++++ b/src/hotspot/share/runtime/abstract_vm_version.cpp
+@@ -257,12 +257,18 @@ const char* Abstract_VM_Version::internal_vm_info_string() {
+     #define FLOAT_ARCH_STR XSTR(FLOAT_ARCH)
+   #endif
+ 
++  #ifdef MUSL_LIBC
++    #define LIBC_STR "-" XSTR(LIBC)
++  #else
++    #define LIBC_STR ""
++  #endif
++
+   #ifndef HOTSPOT_BUILD_TIME
+     #define HOTSPOT_BUILD_TIME __DATE__ " " __TIME__
+   #endif
+ 
+   #define INTERNAL_VERSION_SUFFIX VM_RELEASE ")" \
+-         " for " OS "-" CPU FLOAT_ARCH_STR \
++         " for " OS "-" CPU FLOAT_ARCH_STR LIBC_STR \
+          " JRE (" VERSION_STRING "), built on " HOTSPOT_BUILD_TIME \
+          " by " XSTR(HOTSPOT_BUILD_USER) " with " HOTSPOT_BUILD_COMPILER
+ 
+diff --git a/src/java.base/unix/native/libjli/java_md.c b/src/java.base/unix/native/libjli/java_md.c
+index 822026fb23c..503a2457b04 100644
+--- a/src/java.base/unix/native/libjli/java_md.c
++++ b/src/java.base/unix/native/libjli/java_md.c
+@@ -230,6 +230,14 @@ RequiresSetenv(const char *jvmpath) {
+     char *dmllp = NULL;
+     char *p; /* a utility pointer */
+ 
++#ifdef MUSL_LIBC
++    /*
++     * The musl library loader requires LD_LIBRARY_PATH to be set in order
++     * to correctly resolve the dependency libjava.so has on libjvm.so.
++     */
++    return JNI_TRUE;
++#endif
++
+ #ifdef AIX
+     /* We always have to set the LIBPATH on AIX because ld doesn't support $ORIGIN. */
+     return JNI_TRUE;
+diff --git a/src/jdk.hotspot.agent/linux/native/libsaproc/ps_proc.c b/src/jdk.hotspot.agent/linux/native/libsaproc/ps_proc.c
+index 72d496f5224..b5fec835a98 100644
+--- a/src/jdk.hotspot.agent/linux/native/libsaproc/ps_proc.c
++++ b/src/jdk.hotspot.agent/linux/native/libsaproc/ps_proc.c
+@@ -279,8 +279,17 @@ static attach_state_t ptrace_attach(pid_t pid, char* err_buf, size_t err_buf_len
+         return ATTACH_THREAD_DEAD;
+       }
+     }
++
++    // strerror_r() API function is not compatible in different implementations:
++    // GNU-specific:  char *strerror_r(int errnum, char *buf, size_t buflen);
++    // XSI-compliant: int   strerror_r(int errnum, char *buf, size_t buflen);
+     char buf[200];
++#if defined(__GLIBC__) && defined(_GNU_SOURCE)
+     char* msg = strerror_r(errno, buf, sizeof(buf));
++#else
++    int rc = strerror_r(errno, buf, sizeof(buf));
++    char* msg = (rc == 0) ? (char*)buf : "Unknown";
++#endif
+     snprintf(err_buf, err_buf_len, "ptrace(PTRACE_ATTACH, ..) failed for %d: %s", pid, msg);
+     print_error("%s\n", err_buf);
+     return ATTACH_FAIL;
+diff --git a/src/jdk.jdwp.agent/share/native/libjdwp/util.h b/src/jdk.jdwp.agent/share/native/libjdwp/util.h
+index 97f01629921..c4d31774c64 100644
+--- a/src/jdk.jdwp.agent/share/native/libjdwp/util.h
++++ b/src/jdk.jdwp.agent/share/native/libjdwp/util.h
+@@ -32,6 +32,12 @@
+ #include <stdlib.h>
+ #include <stdarg.h>
+ 
++#ifdef LINUX
++// Note. On Alpine Linux pthread.h includes calloc/malloc functions declaration.
++// We need to include pthread.h before the following stdlib names poisoning.
++#include <pthread.h>
++#endif
++
+ #ifdef DEBUG
+     /* Just to make sure these interfaces are not used here. */
+     #undef free
+diff --git a/test/hotspot/jtreg/TEST.ROOT b/test/hotspot/jtreg/TEST.ROOT
+index 339c67a2d30..77e1850538a 100644
+--- a/test/hotspot/jtreg/TEST.ROOT
++++ b/test/hotspot/jtreg/TEST.ROOT
+@@ -73,6 +73,7 @@ requires.properties= \
+     vm.graal.enabled \
+     vm.compiler1.enabled \
+     vm.compiler2.enabled \
++    vm.musl \
+     docker.support \
+     test.vm.gc.nvdimm
+ 
+diff --git a/test/hotspot/jtreg/runtime/8176717/TestInheritFD.java b/test/hotspot/jtreg/runtime/8176717/TestInheritFD.java
+index 837c59fd531..04a739079f9 100644
+--- a/test/hotspot/jtreg/runtime/8176717/TestInheritFD.java
++++ b/test/hotspot/jtreg/runtime/8176717/TestInheritFD.java
+@@ -30,6 +30,7 @@ import static java.util.stream.Collectors.toList;
+ import static jdk.test.lib.process.ProcessTools.createJavaProcessBuilder;
+ import static jdk.test.lib.Platform.isWindows;
+ import jdk.test.lib.Utils;
++import jdk.test.lib.Platform;
+ import jtreg.SkippedException;
+ 
+ import java.io.BufferedReader;
+@@ -193,7 +194,14 @@ public class TestInheritFD {
+     }
+ 
+     static boolean findOpenLogFile(Collection<String> fileNames) {
++        String pid = Long.toString(ProcessHandle.current().pid());
++        String[] command = lsofCommand().orElseThrow(() ->
++                new RuntimeException("lsof like command not found"));
++        String lsof = command[0];
++        boolean isBusybox = Platform.isBusybox(lsof);
+         return fileNames.stream()
++            // lsof from busybox does not support "-p" option
++            .filter(fileName -> !isBusybox || fileName.contains(pid))
+             .filter(fileName -> fileName.contains(LOG_SUFFIX))
+             .findAny()
+             .isPresent();
+diff --git a/test/hotspot/jtreg/runtime/StackGuardPages/exeinvoke.c b/test/hotspot/jtreg/runtime/StackGuardPages/exeinvoke.c
+index 572f4f1325a..a46f1cef44c 100644
+--- a/test/hotspot/jtreg/runtime/StackGuardPages/exeinvoke.c
++++ b/test/hotspot/jtreg/runtime/StackGuardPages/exeinvoke.c
+@@ -33,6 +33,7 @@
+ 
+ #include <assert.h>
+ #include <jni.h>
++#include <jvm.h>
+ #include <alloca.h>
+ #include <signal.h>
+ #include <string.h>
+@@ -91,6 +92,21 @@ void set_signal_handler() {
+   }
+ }
+ 
++size_t get_java_stacksize () {
++  pthread_attr_t attr;
++  JDK1_1InitArgs jdk_args;
++
++  memset(&jdk_args, 0, (sizeof jdk_args));
++
++  jdk_args.version = JNI_VERSION_1_1;
++  JNI_GetDefaultJavaVMInitArgs(&jdk_args);
++  if (jdk_args.javaStackSize <= 0) {
++    fprintf(stderr, "Test ERROR. Can't get a valid value for the default stacksize.\n");
++    exit(7);
++  }
++  return jdk_args.javaStackSize;
++}
++
+ void *run_java_overflow (void *p) {
+   JNIEnv *env;
+   jclass class_id;
+@@ -258,14 +274,20 @@ int main (int argc, const char** argv) {
+     exit(7);
+   }
+ 
++  size_t stack_size = get_java_stacksize();
+   pthread_t thr;
++  pthread_attr_t thread_attr;
++
++  pthread_attr_init(&thread_attr);
++  pthread_attr_setstacksize(&thread_attr, stack_size);
+ 
+   if (argc > 1 && strcmp(argv[1], "test_java_overflow") == 0) {
+     printf("\nTesting JAVA_OVERFLOW\n");
+ 
+     printf("Testing stack guard page behaviour for other thread\n");
+-    pthread_create (&thr, NULL, run_java_overflow, NULL);
+-    pthread_join (thr, NULL);
++
++    pthread_create(&thr, &thread_attr, run_java_overflow, NULL);
++    pthread_join(thr, NULL);
+ 
+     printf("Testing stack guard page behaviour for initial thread\n");
+     run_java_overflow(NULL);
+@@ -277,8 +299,8 @@ int main (int argc, const char** argv) {
+     printf("\nTesting NATIVE_OVERFLOW\n");
+ 
+     printf("Testing stack guard page behaviour for other thread\n");
+-    pthread_create (&thr, NULL, run_native_overflow, NULL);
+-    pthread_join (thr, NULL);
++    pthread_create(&thr, &thread_attr, run_native_overflow, NULL);
++    pthread_join(thr, NULL);
+ 
+     printf("Testing stack guard page behaviour for initial thread\n");
+     run_native_overflow(NULL);
+diff --git a/test/hotspot/jtreg/runtime/TLS/exestack-tls.c b/test/hotspot/jtreg/runtime/TLS/exestack-tls.c
+index 312fedde937..38cd5d363f7 100644
+--- a/test/hotspot/jtreg/runtime/TLS/exestack-tls.c
++++ b/test/hotspot/jtreg/runtime/TLS/exestack-tls.c
+@@ -26,7 +26,10 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++
++#ifdef __GLIBC__
+ #include <gnu/libc-version.h>
++#endif
+ 
+ // Declare the thread local variable(s) in the main executable. This can be
+ // used to demonstrate the issues associated with the on-stack static TLS blocks
+@@ -54,6 +57,7 @@ JNIEnv* create_vm(JavaVM **jvm, char* argTLS) {
+     return env;
+ }
+ 
++#ifdef __GLIBC__
+ // glibc 2.15 introduced __pthread_get_minstack
+ int glibc_has_pthread_get_minstack() {
+   const char* glibc_vers = gnu_get_libc_version();
+@@ -66,6 +70,11 @@ int glibc_has_pthread_get_minstack() {
+   printf("This version does not provide __pthread_get_minstack\n");
+   return 0;
+ }
++#else
++int glibc_has_pthread_get_minstack() {
++  return 0;
++}
++#endif
+ 
+ int run(jboolean addTLS) {
+     JavaVM *jvm;
+diff --git a/test/hotspot/jtreg/runtime/jni/terminatedThread/TestTerminatedThread.java b/test/hotspot/jtreg/runtime/jni/terminatedThread/TestTerminatedThread.java
+index 49e4f332087..8526feb452c 100644
+--- a/test/hotspot/jtreg/runtime/jni/terminatedThread/TestTerminatedThread.java
++++ b/test/hotspot/jtreg/runtime/jni/terminatedThread/TestTerminatedThread.java
+@@ -26,6 +26,9 @@ import java.lang.management.*;
+  * @test
+  * @bug     8205878 8206954
+  * @requires os.family != "windows"
++ * @comment Calling pthread_getcpuclockid() with invalid pid leads to undefined
++ * behavior in musl libc (see 8240187).
++ * @requires !vm.musl
+  * @summary Basic test of Thread and ThreadMXBean queries on a natively
+  *          attached thread that has failed to detach before terminating.
+  * @comment The native code only supports POSIX so no windows testing
+diff --git a/test/jdk/TEST.ROOT b/test/jdk/TEST.ROOT
+index 4615b0e0d4d..807a21f5b20 100644
+--- a/test/jdk/TEST.ROOT
++++ b/test/jdk/TEST.ROOT
+@@ -52,6 +52,7 @@ requires.properties= \
+     vm.compiler1.enabled \
+     vm.compiler2.enabled \
+     vm.cds \
++    vm.musl \
+     vm.debug \
+     vm.hasSA \
+     vm.hasJFR \
+diff --git a/test/jdk/java/lang/ClassLoader/nativeLibrary/NativeLibraryTest.java b/test/jdk/java/lang/ClassLoader/nativeLibrary/NativeLibraryTest.java
+index 0e1acfc9ccd..893c6151020 100644
+--- a/test/jdk/java/lang/ClassLoader/nativeLibrary/NativeLibraryTest.java
++++ b/test/jdk/java/lang/ClassLoader/nativeLibrary/NativeLibraryTest.java
+@@ -25,6 +25,9 @@
+  * @test
+  * @bug 8164512 8191360
+  * @requires vm.compMode != "Xcomp"
++ * @comment Under musl, dlclose is a no-op. The static variable 'count' in libnative.c
++ * keeps its value across a GC and the check in Test.java fails.
++ * @requires !vm.musl
+  * @summary verify if the native library is unloaded when the class loader is GC'ed
+  * @build p.Test
+  * @run main/othervm/native -Xcheck:jni NativeLibraryTest
+diff --git a/test/jdk/java/lang/ProcessBuilder/Basic.java b/test/jdk/java/lang/ProcessBuilder/Basic.java
+index 7344cb74042..caedb13d184 100644
+--- a/test/jdk/java/lang/ProcessBuilder/Basic.java
++++ b/test/jdk/java/lang/ProcessBuilder/Basic.java
+@@ -31,6 +31,7 @@
+  * @key intermittent
+  * @summary Basic tests for Process and Environment Variable code
+  * @modules java.base/java.lang:open
++ * @library /test/lib
+  * @run main/othervm/timeout=300 Basic
+  * @run main/othervm/timeout=300 -Djdk.lang.Process.launchMechanism=fork Basic
+  * @author Martin Buchholz
+@@ -40,6 +41,7 @@
+  * @test
+  * @modules java.base/java.lang:open
+  * @requires (os.family == "linux")
++ * @library /test/lib
+  * @run main/othervm/timeout=300 -Djdk.lang.Process.launchMechanism=posix_spawn Basic
+  */
+ 
+@@ -63,6 +65,8 @@ import static java.lang.System.out;
+ import static java.lang.Boolean.TRUE;
+ import static java.util.AbstractMap.SimpleImmutableEntry;
+ 
++import jdk.test.lib.Platform;
++
+ public class Basic {
+ 
+     /* used for Windows only */
+@@ -400,8 +404,8 @@ public class Basic {
+                 if (failed != 0) throw new Error("null PATH");
+             } else if (action.equals("PATH search algorithm")) {
+                 equal(System.getenv("PATH"), "dir1:dir2:");
+-                check(new File("/bin/true").exists());
+-                check(new File("/bin/false").exists());
++                check(new File(TrueExe.path()).exists());
++                check(new File(FalseExe.path()).exists());
+                 String[] cmd = {"prog"};
+                 ProcessBuilder pb1 = new ProcessBuilder(cmd);
+                 ProcessBuilder pb2 = new ProcessBuilder(cmd);
+@@ -442,13 +446,13 @@ public class Basic {
+                         checkPermissionDenied(pb);
+ 
+                         // continue searching if EACCES
+-                        copy("/bin/true", "dir2/prog");
++                        copy(TrueExe.path(), "dir2/prog");
+                         equal(run(pb).exitValue(), True.exitValue());
+                         new File("dir1/prog").delete();
+                         new File("dir2/prog").delete();
+ 
+                         new File("dir2/prog").mkdirs();
+-                        copy("/bin/true", "dir1/prog");
++                        copy(TrueExe.path(), "dir1/prog");
+                         equal(run(pb).exitValue(), True.exitValue());
+ 
+                         // Check empty PATH component means current directory.
+@@ -464,10 +468,10 @@ public class Basic {
+                             pb.command(command);
+                             File prog = new File("./prog");
+                             // "Normal" binaries
+-                            copy("/bin/true", "./prog");
++                            copy(TrueExe.path(), "./prog");
+                             equal(run(pb).exitValue(),
+                                   True.exitValue());
+-                            copy("/bin/false", "./prog");
++                            copy(FalseExe.path(), "./prog");
+                             equal(run(pb).exitValue(),
+                                   False.exitValue());
+                             prog.delete();
+@@ -522,12 +526,12 @@ public class Basic {
+                         new File("dir2/prog").delete();
+                         new File("prog").delete();
+                         new File("dir3").mkdirs();
+-                        copy("/bin/true", "dir1/prog");
+-                        copy("/bin/false", "dir3/prog");
++                        copy(TrueExe.path(), "dir1/prog");
++                        copy(FalseExe.path(), "dir3/prog");
+                         pb.environment().put("PATH","dir3");
+                         equal(run(pb).exitValue(), True.exitValue());
+-                        copy("/bin/true", "dir3/prog");
+-                        copy("/bin/false", "dir1/prog");
++                        copy(TrueExe.path(), "dir3/prog");
++                        copy(FalseExe.path(), "dir1/prog");
+                         equal(run(pb).exitValue(), False.exitValue());
+ 
+                     } finally {
+@@ -662,6 +666,43 @@ public class Basic {
+         }
+     }
+ 
++    // On Alpine Linux, /bin/true and /bin/false are just links to /bin/busybox.
++    // Some tests copy /bin/true and /bin/false to files with a different filename.
++    // However, copying the busbox executable into a file with a different name
++    // won't result in the expected return codes. As workaround, we create
++    // executable files that can be copied and produce the expected return
++    // values.
++
++    private static class TrueExe {
++        public static String path() { return path; }
++        private static final String path = path0();
++        private static String path0(){
++            if (!Platform.isBusybox("/bin/true")) {
++                return "/bin/true";
++            } else {
++                File trueExe = new File("true");
++                setFileContents(trueExe, "#!/bin/true\n");
++                trueExe.setExecutable(true);
++                return trueExe.getAbsolutePath();
++            }
++        }
++    }
++
++    private static class FalseExe {
++        public static String path() { return path; }
++        private static final String path = path0();
++        private static String path0(){
++            if (!Platform.isBusybox("/bin/false")) {
++                return "/bin/false";
++            } else {
++                File falseExe = new File("false");
++                setFileContents(falseExe, "#!/bin/false\n");
++                falseExe.setExecutable(true);
++                return falseExe.getAbsolutePath();
++            }
++        }
++    }
++
+     static class EnglishUnix {
+         private static final Boolean is =
+             (! Windows.is() && isEnglish("LANG") && isEnglish("LC_ALL"));
+@@ -1965,7 +2006,7 @@ public class Basic {
+             //----------------------------------------------------------------
+             try {
+                 new File("suBdiR").mkdirs();
+-                copy("/bin/true", "suBdiR/unliKely");
++                copy(TrueExe.path(), "suBdiR/unliKely");
+                 final ProcessBuilder pb =
+                     new ProcessBuilder(new String[]{"unliKely"});
+                 pb.environment().put("PATH", "suBdiR");
+diff --git a/test/jdk/java/lang/ProcessBuilder/RedirectWithLongFilename.java b/test/jdk/java/lang/ProcessBuilder/RedirectWithLongFilename.java
+index 0922153c511..3e07f2ea4eb 100644
+--- a/test/jdk/java/lang/ProcessBuilder/RedirectWithLongFilename.java
++++ b/test/jdk/java/lang/ProcessBuilder/RedirectWithLongFilename.java
+@@ -24,6 +24,7 @@
+ /*
+  * @test
+  * @bug 8072611
++ * @requires (os.family == "windows")
+  * @summary ProcessBuilder Redirect to file appending on Windows should work with long file names
+  * @author Thomas Stuefe
+  */
+@@ -38,11 +39,6 @@ public class RedirectWithLongFilename {
+ 
+     public static void main(String[] args) throws Exception {
+ 
+-        // windows only
+-        if (!Basic.Windows.is()) {
+-            return;
+-        }
+-
+         // Redirect ProcessBuilder output to a file whose pathlen is > 255.
+         Path tmpDir = Paths.get(System.getProperty("java.io.tmpdir"));
+         File dir2 = null;
+diff --git a/test/jdk/java/lang/ProcessHandle/InfoTest.java b/test/jdk/java/lang/ProcessHandle/InfoTest.java
+index 8f6201ff6bf..e61b374e0cf 100644
+--- a/test/jdk/java/lang/ProcessHandle/InfoTest.java
++++ b/test/jdk/java/lang/ProcessHandle/InfoTest.java
+@@ -298,7 +298,14 @@ public class InfoTest {
+                 }
+                 if (info.command().isPresent()) {
+                     String command = info.command().get();
+-                    String expected = Platform.isWindows() ? "sleep.exe" : "sleep";
++                    String expected = "sleep";
++                    if (Platform.isWindows()) {
++                        expected = "sleep.exe";
++                    } else if (Platform.isBusybox("/bin/sleep")) {
++                        // With busybox sleep is just a sym link to busybox.
++                        // The busbox executable is seen as ProcessHandle.Info command.
++                        expected = "busybox";
++                    }
+                     Assert.assertTrue(command.endsWith(expected), "Command: expected: \'" +
+                             expected + "\', actual: " + command);
+ 
+diff --git a/test/jdk/tools/launcher/ExecutionEnvironment.java b/test/jdk/tools/launcher/ExecutionEnvironment.java
+index 08af516e47d..571946caf2a 100644
+--- a/test/jdk/tools/launcher/ExecutionEnvironment.java
++++ b/test/jdk/tools/launcher/ExecutionEnvironment.java
+@@ -25,11 +25,24 @@
+  * @test
+  * @bug 4780570 4731671 6354700 6367077 6670965 4882974
+  * @summary Checks for LD_LIBRARY_PATH and execution  on *nixes
++ * @requires os.family != "windows" & !vm.musl & os.family != "aix"
+  * @library /test/lib
+  * @modules jdk.compiler
+  *          jdk.zipfs
+  * @compile -XDignore.symbol.file ExecutionEnvironment.java
+- * @run main/othervm ExecutionEnvironment
++ * @run main/othervm -DexpandedLdLibraryPath=false ExecutionEnvironment
++ */
++
++/*
++ * @test
++ * @bug 4780570 4731671 6354700 6367077 6670965 4882974
++ * @summary Checks for LD_LIBRARY_PATH and execution  on *nixes
++ * @requires os.family == "aix" | vm.musl
++ * @library /test/lib
++ * @modules jdk.compiler
++ *          jdk.zipfs
++ * @compile -XDignore.symbol.file ExecutionEnvironment.java
++ * @run main/othervm -DexpandedLdLibraryPath=true ExecutionEnvironment
+  */
+ 
+ /*
+@@ -83,6 +96,9 @@ public class ExecutionEnvironment extends TestHelper {
+ 
+     static final File testJarFile = new File("EcoFriendly.jar");
+ 
++    static final boolean IS_EXPANDED_LD_LIBRARY_PATH =
++            Boolean.getBoolean("expandedLdLibraryPath");
++
+     public ExecutionEnvironment() {
+         createTestJar();
+     }
+@@ -137,14 +153,16 @@ public class ExecutionEnvironment extends TestHelper {
+ 
+         for (String x : LD_PATH_STRINGS) {
+             if (!tr.contains(x)) {
+-                if (TestHelper.isAIX && x.startsWith(LD_LIBRARY_PATH)) {
++                if (IS_EXPANDED_LD_LIBRARY_PATH && x.startsWith(LD_LIBRARY_PATH)) {
+                     // AIX does not support the '-rpath' linker options so the
+                     // launchers have to prepend the jdk library path to 'LIBPATH'.
+-                    String aixLibPath = LD_LIBRARY_PATH + "=" +
++                    // The musl library loader requires LD_LIBRARY_PATH to be set in
++                    // order to correctly resolve the dependency libjava.so has on libjvm.so.
++                    String libPath = LD_LIBRARY_PATH + "=" +
+                         System.getenv(LD_LIBRARY_PATH) +
+                         System.getProperty("path.separator") + LD_LIBRARY_PATH_VALUE;
+-                    if (!tr.matches(aixLibPath)) {
+-                        flagError(tr, "FAIL: did not get <" + aixLibPath + ">");
++                    if (!tr.matches(libPath)) {
++                        flagError(tr, "FAIL: did not get <" + libPath + ">");
+                     }
+                 }
+                 else {
+@@ -260,10 +278,6 @@ public class ExecutionEnvironment extends TestHelper {
+         }
+     }
+     public static void main(String... args) throws Exception {
+-        if (isWindows) {
+-            System.err.println("Warning: test not applicable to windows");
+-            return;
+-        }
+         ExecutionEnvironment ee = new ExecutionEnvironment();
+         ee.run(args);
+     }
+diff --git a/test/jdk/tools/launcher/Test7029048.java b/test/jdk/tools/launcher/Test7029048.java
+index 16f50e3b46c..4aab158cfc1 100644
+--- a/test/jdk/tools/launcher/Test7029048.java
++++ b/test/jdk/tools/launcher/Test7029048.java
+@@ -26,9 +26,21 @@
+  * @bug 7029048 8217340 8217216
+  * @summary Ensure that the launcher defends against user settings of the
+  *          LD_LIBRARY_PATH environment variable on Unixes
++ * @requires os.family != "windows" & os.family != "mac" & !vm.musl & os.family != "aix"
+  * @library /test/lib
+  * @compile -XDignore.symbol.file ExecutionEnvironment.java Test7029048.java
+- * @run main Test7029048
++ * @run main/othervm -DexpandedLdLibraryPath=false Test7029048
++ */
++
++/**
++ * @test
++ * @bug 7029048 8217340 8217216
++ * @summary Ensure that the launcher defends against user settings of the
++ *          LD_LIBRARY_PATH environment variable on Unixes
++ * @requires os.family == "aix" | vm.musl
++ * @library /test/lib
++ * @compile -XDignore.symbol.file ExecutionEnvironment.java Test7029048.java
++ * @run main/othervm -DexpandedLdLibraryPath=true Test7029048
+  */
+ 
+ import java.io.File;
+@@ -59,6 +71,9 @@ public class Test7029048 extends TestHelper {
+     private static final File dstClientDir = new File(dstLibDir, "client");
+     private static final File dstClientLibjvm = new File(dstClientDir, LIBJVM);
+ 
++    static final boolean IS_EXPANDED_LD_LIBRARY_PATH =
++            Boolean.getBoolean("expandedLdLibraryPath");
++
+     static String getValue(String name, List<String> in) {
+         for (String x : in) {
+             String[] s = x.split("=");
+@@ -155,7 +170,7 @@ public class Test7029048 extends TestHelper {
+                     }
+ 
+                     desc = "LD_LIBRARY_PATH should not be set (no libjvm.so)";
+-                    if (TestHelper.isAIX) {
++                    if (IS_EXPANDED_LD_LIBRARY_PATH) {
+                         printSkipMessage(desc);
+                         continue;
+                     }
+@@ -165,7 +180,7 @@ public class Test7029048 extends TestHelper {
+                         recursiveDelete(dstLibDir);
+                     }
+                     desc = "LD_LIBRARY_PATH should not be set (no directory)";
+-                    if (TestHelper.isAIX) {
++                    if (IS_EXPANDED_LD_LIBRARY_PATH) {
+                         printSkipMessage(desc);
+                         continue;
+                     }
+@@ -193,15 +208,11 @@ public class Test7029048 extends TestHelper {
+     }
+ 
+     private static void printSkipMessage(String description) {
+-        System.out.printf("Skipping test case '%s' because the Aix launcher" +
+-                          " adds the paths in any case.%n", description);
++        System.out.printf("Skipping test case '%s' because the Aix and musl launchers" +
++                          " add the paths in any case.%n", description);
+     }
+ 
+     public static void main(String... args) throws Exception {
+-        if (TestHelper.isWindows || TestHelper.isMacOSX) {
+-            System.out.println("Note: applicable on neither Windows nor MacOSX");
+-            return;
+-        }
+         if (!TestHelper.haveServerVM) {
+             System.out.println("Note: test relies on server vm, not found, exiting");
+             return;
+diff --git a/test/jtreg-ext/requires/VMProps.java b/test/jtreg-ext/requires/VMProps.java
+index 1112191caa3..1c58ec654cb 100644
+--- a/test/jtreg-ext/requires/VMProps.java
++++ b/test/jtreg-ext/requires/VMProps.java
+@@ -115,6 +115,7 @@ public class VMProps implements Callable<Map<String, String>> {
+         map.put("vm.compiler1.enabled", this::isCompiler1Enabled);
+         map.put("vm.compiler2.enabled", this::isCompiler2Enabled);
+         map.put("docker.support", this::dockerSupport);
++        map.put("vm.musl", this::isMusl);
+         map.put("release.implementor", this::implementor);
+         map.put("test.vm.gc.nvdimm", this::isNvdimmTestEnabled);
+         vmGC(map); // vm.gc.X = true/false
+@@ -514,6 +515,15 @@ public class VMProps implements Callable<Map<String, String>> {
+         return (p.exitValue() == 0);
+     }
+ 
++    /**
++     * Checks musl libc.
++     *
++     * @return true if musl libc is used.
++     */
++    protected String isMusl() {
++        return Boolean.toString(WB.getLibcName().contains("musl"));
++    }
++
+     private String implementor() {
+         try (InputStream in = new BufferedInputStream(new FileInputStream(
+                 System.getProperty("java.home") + "/release"))) {
+diff --git a/test/lib/jdk/test/lib/Platform.java b/test/lib/jdk/test/lib/Platform.java
+index 351ad6a2570..a2a8e23c23e 100644
+--- a/test/lib/jdk/test/lib/Platform.java
++++ b/test/lib/jdk/test/lib/Platform.java
+@@ -109,6 +109,18 @@ public class Platform {
+         return isOs("linux");
+     }
+ 
++    public static boolean isBusybox(String tool) {
++        try {
++            Path toolpath = Paths.get(tool);
++            return !isWindows()
++                    && Files.isSymbolicLink(toolpath)
++                    && Paths.get("/bin/busybox")
++                        .equals(Files.readSymbolicLink(toolpath));
++        } catch (IOException ignore) {
++            return false;
++        }
++    }
++
+     public static boolean isOSX() {
+         return isOs("mac");
+     }
+diff --git a/test/lib/sun/hotspot/WhiteBox.java b/test/lib/sun/hotspot/WhiteBox.java
+index b34f29585ea..b34cf383a00 100644
+--- a/test/lib/sun/hotspot/WhiteBox.java
++++ b/test/lib/sun/hotspot/WhiteBox.java
+@@ -616,6 +616,9 @@ public class WhiteBox {
+   // ThreadSMR GC safety check for threadObj
+   public native void checkThreadObjOfTerminatingThread(Thread target);
+ 
++  // libc name
++  public native String getLibcName();
++
+   public native boolean isJVMTIIncluded();
+ 
+   public native void waitUnsafe(int time_ms);
+-- 
+2.32.0
+
